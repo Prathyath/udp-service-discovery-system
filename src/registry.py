@@ -3,12 +3,16 @@
 
 Receives ADVERTISE / DEREGISTER / DISCOVER datagrams and keeps a table of
 live services. Entries not refreshed within --ttl seconds are purged.
+Server up/down events are reported to the SDN controller over UDP.
 
 Protocol (pipe-separated text):
   ADVERTISE|service|ip|port     server -> registry
   DEREGISTER|service|ip|port    server -> registry
   DISCOVER|service              client -> registry
   RESPONSE|service|ip:port,...  registry -> client (empty list if none)
+Events (registry -> controller):
+  EVENT|SERVER_UP|service|ip|port|new
+  EVENT|SERVER_DOWN|service|ip|port|timeout   (or |deregister)
 """
 import argparse
 import socket
@@ -17,10 +21,24 @@ import time
 
 registry = {}            # {service: {(ip, port): last_seen}}
 lock = threading.Lock()
+event_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+controller_addr = None   # (ip, port) or None when notifications are disabled
 
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def notify(kind, service, ip, port, reason):
+    """Tell the SDN controller about a server event (best effort, UDP)."""
+    if controller_addr is None:
+        return
+    msg = f"EVENT|{kind}|{service}|{ip}|{port}|{reason}"
+    try:
+        event_sock.sendto(msg.encode(), controller_addr)
+        log(f"NOTIFY   controller <- {kind} {service} {ip}:{port} ({reason})")
+    except OSError as e:
+        log(f"NOTIFY   failed ({e})")
 
 
 def purge_loop(ttl, check_interval):
@@ -34,7 +52,7 @@ def purge_loop(ttl, check_interval):
                     if now - registry[service][ep] > ttl:
                         del registry[service][ep]
                         log(f"TIMEOUT  {service} {ep[0]}:{ep[1]} (no advertisement for {ttl}s)")
-                        # TODO (SDN integration): notify controller that this server is down
+                        notify("SERVER_DOWN", service, ep[0], ep[1], "timeout")
                 if not registry[service]:
                     del registry[service]
 
@@ -60,9 +78,11 @@ def handle(data, addr, sock):
                 registry.setdefault(service, {})[ep] = time.time()
                 if new:
                     log(f"REGISTER {service} {ip}:{port} (from {addr[0]})")
+                    notify("SERVER_UP", service, ip, ep[1], "new")
             else:
                 if registry.get(service, {}).pop(ep, None) is not None:
                     log(f"DEREGISTER {service} {ip}:{port}")
+                    notify("SERVER_DOWN", service, ip, ep[1], "deregister")
                     if not registry[service]:
                         del registry[service]
 
@@ -78,16 +98,25 @@ def handle(data, addr, sock):
 
 
 def main():
+    global controller_addr
     ap = argparse.ArgumentParser(description="UDP service registry")
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=5000)
     ap.add_argument("--ttl", type=float, default=6.0, help="seconds before an entry expires")
+    ap.add_argument("--controller-ip", default="10.0.0.254",
+                    help="where to send server up/down events")
+    ap.add_argument("--controller-port", type=int, default=6000)
+    ap.add_argument("--no-controller", action="store_true",
+                    help="do not send events to the controller")
     args = ap.parse_args()
 
+    if not args.no_controller:
+        controller_addr = (args.controller_ip, args.controller_port)
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((args.bind, args.port))
-    log(f"Registry listening on {args.bind}:{args.port} (ttl={args.ttl}s)")
+    log(f"Registry listening on {args.bind}:{args.port} (ttl={args.ttl}s, "
+        f"controller={controller_addr})")
 
     threading.Thread(target=purge_loop, args=(args.ttl, 1.0), daemon=True).start()
 
