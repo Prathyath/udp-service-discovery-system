@@ -29,6 +29,7 @@ flowchart LR
     H4["h4 Client<br/>10.0.0.4"]
     H5["h5 Rogue host<br/>10.0.0.5"]
     C0 -. "OpenFlow 1.3 (TCP 6653)" .- S1
+    H1 -. "server up/down events (UDP 6000 to 10.0.0.254)" .-> C0
     H1 --- S1
     H2 --- S1
     H3 --- S1
@@ -43,7 +44,7 @@ flowchart LR
 | Server | `src/server.py` | Advertises itself every 2 s, serves requests on its own UDP port, deregisters on exit |
 | Client | `src/client.py` | Queries the registry, retries on timeout, measures latency, can call the discovered service |
 | Controller | `controller/sdn_ctrl.py` | Learning switch, discovery-traffic flows, rogue-host blocking, flow-stats monitoring |
-| Topology | `topology/topo.py` | One switch, five hosts, remote controller |
+| Topology | `topology/topo.py` | One switch, five hosts, remote controller; the VM root namespace is attached as 10.0.0.254 so the registry can reach the controller |
 
 ## 4. Application protocol (UDP, text, `|` separated)
 | Message | Direction | Example |
@@ -52,6 +53,16 @@ flowchart LR
 | `DEREGISTER\|service\|ip\|port` | server -> registry | `DEREGISTER\|web\|10.0.0.2\|8001` |
 | `DISCOVER\|service` | client -> registry | `DISCOVER\|web` |
 | `RESPONSE\|service\|ip:port,...` | registry -> client | `RESPONSE\|web\|10.0.0.2:8001,10.0.0.3:8002` |
+
+Registry -> controller events (UDP, sent to 10.0.0.254:6000):
+
+| Message | Meaning |
+|---|---|
+| `EVENT\|SERVER_UP\|service\|ip\|port\|new` | server registered for the first time |
+| `EVENT\|SERVER_DOWN\|service\|ip\|port\|timeout` | advertisements stopped for 6 s |
+| `EVENT\|SERVER_DOWN\|service\|ip\|port\|deregister` | server left gracefully |
+
+The controller accepts events only from the registry (10.0.0.1).
 
 Timing: advertisement interval 2 s; registry TTL 6 s (3 missed
 advertisements); client timeout 1 s with up to 3 attempts.
@@ -77,6 +88,7 @@ sequenceDiagram
 |---|---|---|---|
 | 100 | UDP, dst port 5000, src IP in allow-list | NORMAL | Allowed discovery traffic |
 | 100 | UDP, src port 5000 | NORMAL | Registry replies |
+| 96 | UDP, dst IP:port of a server reported down | drop | Installed on `SERVER_DOWN`, removed on `SERVER_UP` |
 | 95 | UDP, dst port 5000, src IP = blocked host | drop | Installed dynamically per rogue host |
 | 90 | UDP, dst port 5000 (anyone else) | send to controller | Controller logs and blocks unknown hosts |
 | 1 | in_port, eth_src, eth_dst | output port | Learned forwarding |
@@ -88,8 +100,8 @@ priority-95 drop rule, after which the switch drops that host's discovery
 traffic without involving the controller. The controller polls flow statistics
 every 5 s and logs request, reply and blocked-packet counts.
 
-## 7. Planned extensions
-- Registry notifies the controller of server up/down events; controller reacts
+## 7. Implemented and planned extensions
+- Implemented: registry notifies the controller of server up/down events; the controller drops traffic to dead servers and restores it on recovery
 - Redundant topology with link-failure rerouting
 - Congestion and performance experiments against a plain learning-switch baseline
 
