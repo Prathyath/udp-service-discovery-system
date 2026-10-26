@@ -8,7 +8,9 @@ them, and clients discover them. The controller prioritises discovery traffic,
 blocks unauthorised hosts, and reacts to server failures reported by the
 registry.
 
-Team: _add names / SRNs here_
+Team: Prathyath / PES1UG25CS673
+      M.VAISHNAVI / PES1UG25CS662
+      NIHAL J GOWDA / PES1UG25CS668
 
 ## Features
 | Requirement | Implementation |
