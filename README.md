@@ -70,27 +70,39 @@ The registry, server and client use only the Python standard library.
 ## How to run
 Always run from the repository root. Start the controller first.
 
-**Terminal 1: controller**
+**Step 1: Start the controller (Terminal 1)**
 ```bash
 source venv/bin/activate
 ryu-manager controller/sdn_ctrl.py
 ```
 
-**Terminal 2: network**
+**Step 2: Start the network (Terminal 2)**
 ```bash
 sudo mn -c
 sudo python3 topology/topo.py
 ```
 
-Roles: `h1` registry (10.0.0.1), `h2`/`h3` servers, `h4` client, `h5` rogue
+Roles: `h1` registry (10.0.0.1), `h2` / `h3` servers, `h4` client, `h5` rogue
 host, and the VM itself at 10.0.0.254 receives registry events (UDP 6000).
 
-At the `mininet>` prompt:
-```
+At the `mininet>` prompt, check connectivity (expect `0% dropped`):
+```bash
 pingall
+```
+
+**Step 3: Start the registry and servers (dynamic registration)**
+
+The controller prints two `EVENT server UP` lines.
+```bash
 h1 python3 src/registry.py > results/registry.log 2>&1 &
 h2 python3 src/server.py --name web --port 8001 > results/s1.log 2>&1 &
 h3 python3 src/server.py --name web --port 8002 > results/s2.log 2>&1 &
+```
+
+**Step 4: Run the client (discovery and latency)**
+
+The client lists both servers, prints the latency, and calls one of them.
+```bash
 h4 python3 src/client.py --service web --count 5 --use
 ```
 
@@ -99,10 +111,100 @@ Inspect the switch from a third terminal:
 sudo ovs-ofctl -O OpenFlow13 dump-flows s1
 ```
 
-Useful options: `client.py --csv results/latency.csv --label normal`,
-`registry.py --no-controller` (disable event notifications), `--ttl`.
+Only the discovery rules (priority 100):
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep "priority=100"
+```
 
-Cleanup: type `exit`, then `sudo mn -c`, and Ctrl+C the controller.
+**Step 5: Server crash**
+
+Kill a server abruptly. After about 6 s the registry logs `TIMEOUT` and the
+controller prints `EVENT server DOWN`:
+```bash
+h3 pkill -9 -f "port 8002"
+```
+
+The priority-96 drop rule for the dead server (third terminal):
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep "priority=96"
+```
+
+The client now lists only the surviving server:
+```bash
+h4 python3 src/client.py --service web
+```
+
+Send 20 packets to the dead server. The switch drops them and the controller
+shows `dead-server-drops=20`:
+```bash
+h4 python3 -c "import socket;s=socket.socket(2,2);[s.sendto(b'x',('10.0.0.3',8002)) for _ in range(20)]"
+```
+
+**Step 6: Server recovery**
+
+Restart the server. The controller prints `EVENT server UP` and removes the drop rule:
+```bash
+h3 python3 src/server.py --name web --port 8002 > results/s2.log 2>&1 &
+```
+
+The same grep now prints nothing (third terminal):
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep "priority=96"
+```
+
+The client discovers both servers again:
+```bash
+h4 python3 src/client.py --service web
+```
+
+**Step 7: Rogue host**
+
+`h5` is not on the controller's allow-list. The controller prints
+`BLOCKED unauthorized host 10.0.0.5`, and the client never sees the rogue server:
+```bash
+h5 python3 src/server.py --name web --port 9000 > results/rogue.log 2>&1 &
+h4 python3 src/client.py --service web
+```
+
+The priority-95 drop rule (third terminal):
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep "priority=95"
+```
+
+**Optional: graceful server exit**
+
+The server sends `DEREGISTER`, so the registry removes it immediately with no 6 s wait:
+```bash
+h2 pkill -f "port 8001"
+h4 python3 src/client.py --service web
+```
+
+**Optional: forged event from a non-registry host**
+
+The controller prints `ignored event from 10.0.0.5 (not the registry)`:
+```bash
+h5 python3 -c "import socket;socket.socket(2,2).sendto(b'EVENT|SERVER_DOWN|web|10.0.0.2|8001|timeout',('10.0.0.254',6000))"
+```
+
+**Registry log**
+
+Shows the `REGISTER`, `DEREGISTER`, `TIMEOUT` and `NOTIFY` events:
+```bash
+h1 cat results/registry.log
+```
+
+**Useful options**
+
+`client.py --csv results/latency.csv --label normal` saves latency results,
+`registry.py --no-controller` disables event notifications, and `--ttl` changes
+the timeout.
+
+**Cleanup**
+```bash
+exit
+sudo mn -c
+```
+Then press Ctrl+C in the controller terminal.
 
 ## Test cases
 | # | Test | Steps | Expected result | Evidence |
