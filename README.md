@@ -172,6 +172,74 @@ Recovery needs no manual step and no restart of the other components.
 | 1 | learned MAC pair | output port | by the learning switch |
 | 0 | any | send to controller | at switch connect |
 
+## Implementation
+
+### Application layer (UDP sockets)
+- **Server** (`src/server.py`): a loop sends `ADVERTISE|service|ip|port` to the
+  registry every 2 s. A separate thread listens on the service port and answers
+  requests. On Ctrl+C or SIGTERM it sends `DEREGISTER`.
+- **Registry** (`src/registry.py`): the main thread receives datagrams and updates
+  the table `{service: {(ip, port): last_seen}}`. A background purge thread runs
+  every 1 s. A lock protects the table, because both threads use it.
+- **Client** (`src/client.py`): sends `DISCOVER`, waits 1 s for a reply, retries up
+  to 3 times, and measures the round trip with `time.perf_counter()`.
+
+### Server crash handling
+A crashed server cannot announce its own failure, so the registry detects it
+from missing advertisements (soft state).
+
+1. The server is killed (`kill -9`), so no `DEREGISTER` is sent and its
+   advertisements stop.
+2. The purge thread finds that `now - last_seen > 6 s` (TTL = 3 missed
+   advertisements), deletes the entry, and logs `TIMEOUT`.
+3. The registry sends `EVENT|SERVER_DOWN|service|ip|port|timeout` to the
+   controller (UDP 6000).
+4. The controller accepts the event only if it comes from the registry's IP, then
+   installs a **priority-96 drop rule** (`ipv4_dst=ip, udp_dst=port`) on every
+   connected switch. Traffic to the dead server is now dropped in the switch.
+5. From then on the registry no longer returns that server in `RESPONSE`
+   messages, so new clients never see it.
+
+Detection time is 6 to 7 s after the last advertisement: the 6 s TTL plus up to
+1 s until the next purge check. The controller reacts within milliseconds of
+the event.
+
+A graceful exit follows the same path, except the server sends `DEREGISTER`.
+The registry removes it immediately and sends
+`SERVER_DOWN|...|deregister`, so there is no 6 s delay.
+
+### Server recovery
+Recovery needs no manual step and no restart of the other components.
+
+1. The restarted server resumes sending `ADVERTISE`.
+2. The registry sees an endpoint that is not in its table, logs `REGISTER`, and
+   sends `EVENT|SERVER_UP|service|ip|port|new` to the controller.
+3. The controller removes the priority-96 drop rule with a strict OpenFlow
+   delete, and clients discover the server again on their next query.
+4. If a switch reconnects to the controller, the controller re-installs the drop
+   rules for servers still marked as down, so the network state stays
+   consistent.
+
+### SDN layer (`controller/sdn_ctrl.py`)
+- Learning switch for normal traffic (priority 1).
+- Discovery traffic (UDP 5000) allowed from the allow-listed hosts (priority 100).
+- Unknown hosts sending to UDP 5000 match a priority-90 rule that sends the
+  packet to the controller. The controller logs `BLOCKED` and installs a
+  priority-95 drop rule for that host.
+- A UDP event listener (port 6000) applies the registry events above.
+- Flow statistics are polled every 5 s and logged (discovery packets, rogue
+  drops, dead-server drops).
+
+### Flow table summary
+| Priority | Match | Action | Installed |
+|---|---|---|---|
+| 100 | UDP dst 5000 from allowed host; UDP src 5000 | normal forwarding | at switch connect |
+| 96 | UDP to a server reported down | drop | on `SERVER_DOWN`, removed on `SERVER_UP` |
+| 95 | UDP dst 5000 from a blocked host | drop | when a rogue host is detected |
+| 90 | UDP dst 5000 from anyone else | send to controller | at switch connect |
+| 1 | learned MAC pair | output port | by the learning switch |
+| 0 | any | send to controller | at switch connect |
+
 ## Test cases
 | # | Test | Steps | Expected result | Evidence |
 |---|---|---|---|---|
