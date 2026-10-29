@@ -171,20 +171,6 @@ The priority-95 drop rule (third terminal):
 sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep "priority=95"
 ```
 
-**Optional: graceful server exit**
-
-The server sends `DEREGISTER`, so the registry removes it immediately with no 6 s wait:
-```bash
-h2 pkill -f "port 8001"
-h4 python3 src/client.py --service web
-```
-
-**Optional: forged event from a non-registry host**
-
-The controller prints `ignored event from 10.0.0.5 (not the registry)`:
-```bash
-h5 python3 -c "import socket;socket.socket(2,2).sendto(b'EVENT|SERVER_DOWN|web|10.0.0.2|8001|timeout',('10.0.0.254',6000))"
-```
 
 **Registry log**
 
